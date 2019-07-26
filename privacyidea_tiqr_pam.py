@@ -126,8 +126,12 @@ class Authenticator(object):
 
             if result.get("status"):
                 if result.get("value"):
-                    save_auth_item(self.sqlfile, self.user, serial, tokentype,
-                                   auth_item)
+                    #if tokentype in [ 'totp' ]:
+                    if self.debug:
+                        syslog.syslog(syslog.LOG_DEBUG,
+                                "%s: success for tokentype: %s" % (__name__, tokentype))
+                    #save_auth_item(self.sqlfile, self.user, serial, tokentype,
+                                   #auth_item)
                     return True
             else:
                 syslog.syslog(syslog.LOG_ERR,
@@ -178,6 +182,9 @@ class Authenticator(object):
 
             if result.get("status"):
                 if result.get("value"):
+                    if self.debug:
+                        syslog.syslog(syslog.LOG_DEBUG,
+                                "%s: success for tokentype: %s" % (__name__, tokentype))
                     rval = self.pamh.PAM_SUCCESS
                     save_auth_item(self.sqlfile, self.user, serial, tokentype,
                                    auth_item)
@@ -191,14 +198,6 @@ class Authenticator(object):
                             rval = self.tiqr_challenge_response(
                                      password, transaction_id,
                                      message, attributes)
-                        # if "u2fSignRequest" in attributes:
-                        #     rval = self.u2f_challenge_response(
-                        #             transaction_id, message,
-                        #             attributes)
-                        # else:
-                        #     rval = self.challenge_response(transaction_id,
-                        #                                    message,
-                        #                                    attributes)
                     else:
                         rval = self.pamh.PAM_AUTH_ERR
             else:
@@ -210,11 +209,12 @@ class Authenticator(object):
 
     def tiqr_challenge_response(self, password, transaction_id, header, attributes):
         rval = self.pamh.PAM_SYSTEM_ERR
-
-
         data = attributes.get('value')
         syslog.syslog(syslog.LOG_DEBUG, "Polling for TIQR challenge response: %s" %(data))
-        message = generate_qr(header, data)
+        #message = generate_qr(header, data)
+        generate_better_qr(header, data)
+        message = "Hit return after scanning"
+
         #pam_message = self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_ON, message)
         self.pamh.conversation(self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_ON, message))
 
@@ -226,43 +226,6 @@ class Authenticator(object):
         data = {"user": self.user,
                 "transaction_id": transaction_id,
                 "pass": password}
-        if self.realm:
-            data["realm"] = self.realm
-
-        json_response = self.make_request(data)
-
-        result = json_response.get("result")
-        detail = json_response.get("detail")
-
-        if self.debug:
-            syslog.syslog(syslog.LOG_DEBUG,
-                          "%s: result: %s" % (__name__, result))
-            syslog.syslog(syslog.LOG_DEBUG,
-                          "%s: detail: %s" % (__name__, detail))
-
-        if result.get("status"):
-            if result.get("value"):
-                rval = self.pamh.PAM_SUCCESS
-            else:
-                rval = self.pamh.PAM_AUTH_ERR
-        else:
-            syslog.syslog(syslog.LOG_ERR,
-                          "%s: %s" % (__name__,
-                                      result.get("error").get("message")))
-
-        return rval
-
-    def challenge_response(self, transaction_id, message, attributes):
-        rval = self.pamh.PAM_SYSTEM_ERR
-
-        syslog.syslog(syslog.LOG_DEBUG, "Prompting for challenge response")
-        pam_message = self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_ON, message)
-        response = self.pamh.conversation(pam_message)
-        otp = response.resp
-        r_code = response.resp_retcode
-        data = {"user": self.user,
-                "transaction_id": transaction_id,
-                "pass": otp}
         if self.realm:
             data["realm"] = self.realm
 
@@ -355,12 +318,19 @@ def pam_sm_close_session(pamh, flags, argv):
 def pam_sm_chauthtok(pamh, flags, argv):
     return pamh.PAM_SUCCESS
 
+def generate_better_qr(header,data):
+    import pyqrcode
+    QRCode = pyqrcode.create( data )
+    #QRCode.svg('/tmp/QRCode.svg', scale=8)
+    #QRCode.eps('/tmp/QRCode.eps', scale=2)
+    print(QRCode.terminal(quiet_zone=1))
+
 def generate_qr(header, data):
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(data)
     qr.make()
     return generate_qr_big(qr.modules, header)
-    return generate_qr_small(qr.modules, header)
+    #return generate_qr_small(qr.modules, header)
 
     #if config['qr']['big']:
     #    return generate_qr_big(qr.modules, config)

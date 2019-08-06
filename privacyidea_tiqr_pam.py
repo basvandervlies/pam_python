@@ -46,7 +46,6 @@ import sqlite3
 import passlib.hash
 import time
 import traceback
-import qrcode
 
 
 def _get_config(argv):
@@ -72,7 +71,7 @@ class Authenticator(object):
     def __init__(self, pamh, config):
         self.pamh = pamh
         self.user = pamh.get_user(None)
-        self.URL = config.get("url", "https://pi-web2.surfsara.nl")
+        self.URL = config.get("url", "https://localhost")
         self.sslverify = not config.get("nosslverify", False)
         cacerts = config.get("cacerts")
         # If we do verify SSL certificates and if a CA Cert Bundle file is
@@ -82,6 +81,8 @@ class Authenticator(object):
         self.realm = config.get("realm")
         self.debug = config.get("debug")
         self.sqlfile = config.get("sqlfile", "/etc/privacyidea/pam.sqlite")
+        self.tiqr_footer = config.get("tiqr_footer", "Scan QR code on telephone")
+        self.tiqr_timeout = config.get("tiqr_timeout", 30)
 
     def make_request(self, data, endpoint="/validate/check"):
         # add a user-agent to be displayed in the Client Application Type
@@ -195,7 +196,7 @@ class Authenticator(object):
                         attributes = detail.get("attributes") or {}
                         message = detail.get("message").encode("utf-8")
                         if tokentype in [ 'tiqr' ]:
-                            rval = self.tiqr_challenge_response(
+                            return self.tiqr_challenge_response(
                                      password, transaction_id,
                                      message, attributes)
                     else:
@@ -211,17 +212,9 @@ class Authenticator(object):
         rval = self.pamh.PAM_SYSTEM_ERR
         data = attributes.get('value')
         syslog.syslog(syslog.LOG_DEBUG, "Polling for TIQR challenge response: %s" %(data))
-        #message = generate_qr(header, data)
-        generate_better_qr(header, data)
-        message = "Hit return after scanning"
+        generate_qr(header, data)
 
-        #pam_message = self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_ON, message)
-        self.pamh.conversation(self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_ON, message))
-
-
-        #response = self.pamh.conversation(pam_message)
-        #otp = response.resp
-        #r_code = response.resp_retcode
+        self.pamh.conversation(self.pamh.Message(self.pamh.PAM_TEXT_INFO, self.tiqr_footer))
 
         data = {"user": self.user,
                 "transaction_id": transaction_id,
@@ -229,24 +222,37 @@ class Authenticator(object):
         if self.realm:
             data["realm"] = self.realm
 
-        json_response = self.make_request(data)
 
-        result = json_response.get("result")
-        detail = json_response.get("detail")
-
-        if self.debug:
-            syslog.syslog(syslog.LOG_DEBUG,
-                          "%s: result: %s" % (__name__, result))
-            syslog.syslog(syslog.LOG_DEBUG,
-                          "%s: detail: %s" % (__name__, detail))
-
-        if result.get("status"):
-            if result.get("value"):
-                rval = self.pamh.PAM_SUCCESS
-            else:
-                rval = self.pamh.PAM_AUTH_ERR
-        else:
+        try:
+            max_time = int(self.tiqr_timeout)
+        except ValueError, detail:
             syslog.syslog(syslog.LOG_ERR,
+                          "%s: 'tiqr_timeout' value is not an integer: %s, using 30 seconds" % (__name__, self.tiqr_timeout))
+            max_time = 30
+
+        user_time = 0
+        while user_time < max_time:
+            json_response = self.make_request(data)
+
+            result = json_response.get("result")
+            detail = json_response.get("detail")
+
+            if self.debug:
+                syslog.syslog(syslog.LOG_DEBUG,
+                              "%s: result: %s" % (__name__, result))
+                syslog.syslog(syslog.LOG_DEBUG,
+                              "%s: detail: %s" % (__name__, detail))
+
+            if result.get("status"):
+                if result.get("value"):
+                    rval = self.pamh.PAM_SUCCESS
+                    break
+                else:
+                    time.sleep(2)
+                    user_time += 2
+                    #rval = self.pamh.PAM_AUTH_ERR
+            else:
+                syslog.syslog(syslog.LOG_ERR,
                           "%s: %s" % (__name__,
                                       result.get("error").get("message")))
 
@@ -256,7 +262,7 @@ def pam_sm_authenticate(pamh, flags, argv):
     config = _get_config(argv)
     debug = config.get("debug")
     try_first_pass = config.get("try_first_pass")
-    prompt = config.get("prompt", "Your TIQR pincode")
+    prompt = config.get("prompt", "Your TIQR pincode or TOTP code (pin+otp):")
     if prompt[-1] != ":":
         prompt += ":"
     rval = pamh.PAM_AUTH_ERR
@@ -318,14 +324,17 @@ def pam_sm_close_session(pamh, flags, argv):
 def pam_sm_chauthtok(pamh, flags, argv):
     return pamh.PAM_SUCCESS
 
-def generate_better_qr(header,data):
+def generate_qr(header,data):
     import pyqrcode
-    QRCode = pyqrcode.create( data )
+    QRCode = pyqrcode.create( data, error='L' )
     #QRCode.svg('/tmp/QRCode.svg', scale=8)
     #QRCode.eps('/tmp/QRCode.eps', scale=2)
     print(QRCode.terminal(quiet_zone=1))
 
-def generate_qr(header, data):
+
+### Will be removed
+def generate__old_qr(header, data):
+    import qrcode
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L)
     qr.add_data(data)
     qr.make()
@@ -428,6 +437,7 @@ def qr_full_char(filled,):
             return '\033[40;97m\x20\x20\033[0m'
         else:
             return '\033[40;97m\xE2\x96\x88\xE2\x96\x88\033[0m'
+### End Will be removed
 
 
 def check_offline_otp(user, otp, sqlfile, window=10, refill=True):

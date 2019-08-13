@@ -199,6 +199,10 @@ class Authenticator(object):
                             return self.tiqr_challenge_response(
                                      password, transaction_id,
                                      message, attributes)
+                        elif tokentype in [ 'totp']:
+                            return self.totp_challenge_response(
+                                     password, transaction_id,
+                                     message, attributes)
                     else:
                         rval = self.pamh.PAM_AUTH_ERR
             else:
@@ -208,13 +212,14 @@ class Authenticator(object):
 
         return rval
 
-    def tiqr_challenge_response(self, password, transaction_id, header, attributes):
+    def tiqr_challenge_response(self, password, transaction_id, message, attributes):
         rval = self.pamh.PAM_SYSTEM_ERR
         data = attributes.get('value')
         syslog.syslog(syslog.LOG_DEBUG, "Polling for TIQR challenge response: %s" %(data))
-        generate_qr(header, data)
+        generate_qr( data)
 
-        self.pamh.conversation(self.pamh.Message(self.pamh.PAM_TEXT_INFO, self.tiqr_footer))
+        #self.pamh.conversation(self.pamh.Message(self.pamh.PAM_TEXT_INFO, self.tiqr_footer))
+        self.pamh.conversation(self.pamh.Message(self.pamh.PAM_TEXT_INFO, message))
 
         data = {"user": self.user,
                 "transaction_id": transaction_id,
@@ -227,36 +232,57 @@ class Authenticator(object):
             max_time = int(self.tiqr_timeout)
         except ValueError, detail:
             syslog.syslog(syslog.LOG_ERR,
-                          "%s: 'tiqr_timeout' value is not an integer: %s, using 30 seconds" % (__name__, self.tiqr_timeout))
+                  "%s: 'tiqr_timeout' value is not an integer: %s, using 30 seconds"
+                    %(__name__, self.tiqr_timeout))
             max_time = 30
 
         user_time = 0
         while user_time < max_time:
-            json_response = self.make_request(data)
-
-            result = json_response.get("result")
-            detail = json_response.get("detail")
-
-            if self.debug:
-                syslog.syslog(syslog.LOG_DEBUG,
-                              "%s: result: %s" % (__name__, result))
-                syslog.syslog(syslog.LOG_DEBUG,
-                              "%s: detail: %s" % (__name__, detail))
-
-            if result.get("status"):
-                if result.get("value"):
-                    rval = self.pamh.PAM_SUCCESS
-                    break
-                else:
-                    time.sleep(2)
-                    user_time += 2
-                    #rval = self.pamh.PAM_AUTH_ERR
+            if self.check_challenge_response(data):
+                rval = self.pamh.PAM_SUCCESS
+                break
             else:
-                syslog.syslog(syslog.LOG_ERR,
-                          "%s: %s" % (__name__,
-                                      result.get("error").get("message")))
+                time.sleep(2)
+                user_time += 2
 
         return rval
+
+    def totp_challenge_response(self, password, transaction_id, message, attributes):
+        rval = self.pamh.PAM_SYSTEM_ERR
+        syslog.syslog(syslog.LOG_DEBUG, "TOTP challenge response:")
+
+        pam_mesg = self.pamh.Message(self.pamh.PAM_PROMPT_ECHO_OFF, "%s " %message)
+        response = self.pamh.conversation(pam_mesg)
+        otp = response.resp
+
+        data = {"user": self.user,
+                "transaction_id": transaction_id,
+                "pass": otp}
+        if self.realm:
+            data["realm"] = self.realm
+
+        if self.check_challenge_response(data):
+            rval = self.pamh.PAM_SUCCESS
+
+        return rval
+
+    def check_challenge_response(self, data):
+        json_response = self.make_request(data)
+        result = json_response.get("result")
+        detail = json_response.get("detail")
+
+        if self.debug:
+            syslog.syslog(syslog.LOG_DEBUG,
+                  "%s: result: %s" % (__name__, result))
+            syslog.syslog(syslog.LOG_DEBUG,
+                  "%s: detail: %s" % (__name__, detail))
+
+        if result.get("status"):
+            if result.get("value"):
+                return True
+
+        return False
+
 
 def pam_sm_authenticate(pamh, flags, argv):
     config = _get_config(argv)
@@ -324,7 +350,7 @@ def pam_sm_close_session(pamh, flags, argv):
 def pam_sm_chauthtok(pamh, flags, argv):
     return pamh.PAM_SUCCESS
 
-def generate_qr(header,data):
+def generate_qr(data):
     import pyqrcode
     QRCode = pyqrcode.create( data, error='L' )
     #QRCode.svg('/tmp/QRCode.svg', scale=8)
